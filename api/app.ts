@@ -160,24 +160,93 @@ export function saveNotes() {
   }, 300);
 }
 
+// Cloud storage integration (Upstash Redis / Vercel KV REST API)
+// Automatically active when user connects Vercel KV or Upstash in Vercel
+async function getCloudNote(id: string): Promise<StoredNote | null> {
+  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!url || !token) return null;
+  try {
+    const cleanUrl = url.replace(/\/+$/, '');
+    const res = await fetch(`${cleanUrl}/get/note:${id.toLowerCase()}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data && data.result) {
+      const parsed: StoredNote = typeof data.result === 'string' ? JSON.parse(data.result) : data.result;
+      if (parsed && parsed.id) {
+        notesStore.set(parsed.id.toLowerCase(), parsed);
+        return parsed;
+      }
+    }
+    return null;
+  } catch (err) {
+    console.warn('Cloud KV get error:', err);
+    return null;
+  }
+}
+
+async function saveCloudNote(note: StoredNote): Promise<void> {
+  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!url || !token) return;
+  try {
+    const cleanUrl = url.replace(/\/+$/, '');
+    await fetch(`${cleanUrl}/set/note:${note.id.toLowerCase()}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(note),
+    });
+  } catch (err) {
+    console.warn('Cloud KV save error:', err);
+  }
+}
+
+async function deleteCloudNote(id: string): Promise<void> {
+  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!url || !token) return;
+  try {
+    const cleanUrl = url.replace(/\/+$/, '');
+    await fetch(`${cleanUrl}/del/note:${id.toLowerCase()}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch (err) {
+    console.warn('Cloud KV delete error:', err);
+  }
+}
+
 loadNotes();
 
 // REST API Handlers
 
 // Health check
 app.get(['/api/health', '/health'], (req, res) => {
-  res.json({ status: 'ok', notesCount: notesStore.size });
+  const hasCloudKV = Boolean(
+    (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) ||
+    (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN)
+  );
+  res.json({ status: 'ok', notesCount: notesStore.size, hasCloudKV });
 });
 
 // Check slug availability
-const handleCheckSlug = (req: express.Request, res: express.Response) => {
+const handleCheckSlug = async (req: express.Request, res: express.Response) => {
   const raw = (req.params.id || (req.query.slug as string) || (req.query.id as string) || '').trim().toLowerCase();
   const id = raw.replace(/[^a-z0-9-_]/g, '');
   if (!id) {
     res.json({ id: '', available: false });
     return;
   }
-  const exists = notesStore.has(id);
+  let exists = notesStore.has(id);
+  if (!exists) {
+    const cloudNote = await getCloudNote(id);
+    if (cloudNote) exists = true;
+  }
   res.json({ id, available: !exists });
 };
 
@@ -185,10 +254,17 @@ app.get(['/api/check-slug/:id', '/check-slug/:id'], handleCheckSlug);
 app.get(['/api/check-slug', '/check-slug'], handleCheckSlug);
 
 // Get note by ID
-const handleGetNote = (req: express.Request, res: express.Response) => {
+const handleGetNote = async (req: express.Request, res: express.Response) => {
   const raw = (req.params.id || (req.query.id as string) || '').trim().toLowerCase();
   const id = raw.replace(/[^a-z0-9-_]/g, '');
-  const note = notesStore.get(id);
+  let note = notesStore.get(id);
+
+  if (!note) {
+    const cloudNote = await getCloudNote(id);
+    if (cloudNote) {
+      note = cloudNote;
+    }
+  }
 
   if (!note) {
     res.status(404).json({ exists: false, message: 'Note not found' });
@@ -221,11 +297,18 @@ app.get(['/api/notes', '/notes'], (req, res) => {
 });
 
 // Password verification for protected notes
-const handleVerifyNote = (req: express.Request, res: express.Response) => {
+const handleVerifyNote = async (req: express.Request, res: express.Response) => {
   const raw = (req.params.id || req.body.id || '').trim().toLowerCase();
   const id = raw.replace(/[^a-z0-9-_]/g, '');
   const { password } = req.body;
-  const note = notesStore.get(id);
+  let note = notesStore.get(id);
+
+  if (!note) {
+    const cloudNote = await getCloudNote(id);
+    if (cloudNote) {
+      note = cloudNote;
+    }
+  }
 
   if (!note) {
     res.status(404).json({ success: false, message: 'Note not found' });
@@ -258,7 +341,7 @@ app.post(
 );
 
 // Create or update note
-const handleCreateOrUpdateNote = (req: express.Request, res: express.Response) => {
+const handleCreateOrUpdateNote = async (req: express.Request, res: express.Response) => {
   const rawId = req.body.id || req.params.id || (req.query.id as string);
   const { title = 'Untitled Note', content = '', password, overwrite } = req.body;
 
@@ -273,7 +356,14 @@ const handleCreateOrUpdateNote = (req: express.Request, res: express.Response) =
     return;
   }
 
-  const existing = notesStore.get(id);
+  let existing = notesStore.get(id);
+  if (!existing) {
+    const cloudNote = await getCloudNote(id);
+    if (cloudNote) {
+      existing = cloudNote;
+    }
+  }
+
   if (existing) {
     const isUpdateRequest = Boolean(overwrite || req.method === 'PUT' || req.params.id);
     if (isUpdateRequest) {
@@ -289,7 +379,9 @@ const handleCreateOrUpdateNote = (req: express.Request, res: express.Response) =
       }
       existing.updatedAt = Date.now();
       existing.version = (existing.version || 1) + 1;
+      notesStore.set(id, existing);
       saveNotes();
+      await saveCloudNote(existing);
 
       res.json({
         success: true,
@@ -317,6 +409,7 @@ const handleCreateOrUpdateNote = (req: express.Request, res: express.Response) =
 
   notesStore.set(id, newNote);
   saveNotes();
+  await saveCloudNote(newNote);
 
   res.json({
     success: true,
@@ -329,6 +422,49 @@ app.post(
   handleCreateOrUpdateNote
 );
 app.put(['/api/notes/:id', '/notes/:id', '/api/notes', '/notes'], handleCreateOrUpdateNote);
+
+// Delete note API (Requested: note stays published until deleted)
+const handleDeleteNote = async (req: express.Request, res: express.Response) => {
+  const rawId = req.params.id || req.body.id || (req.query.id as string);
+  const password = req.body?.password || (req.query.password as string);
+  const id = (rawId || '').trim().toLowerCase().replace(/[^a-z0-9-_]/g, '');
+
+  if (!id) {
+    res.status(400).json({ success: false, message: 'Valid note ID is required' });
+    return;
+  }
+
+  let existing = notesStore.get(id);
+  if (!existing) {
+    const cloud = await getCloudNote(id);
+    if (cloud) existing = cloud;
+  }
+
+  if (!existing) {
+    res.status(404).json({ success: false, message: 'Note not found' });
+    return;
+  }
+
+  if (existing.hasPassword) {
+    if (!password || hashPassword(password) !== existing.passwordHash) {
+      res.status(401).json({ success: false, message: 'Incorrect password to delete this note' });
+      return;
+    }
+  }
+
+  notesStore.delete(id);
+  saveNotes();
+  await deleteCloudNote(id);
+
+  res.json({
+    success: true,
+    message: `Note /${id} has been permanently deleted.`,
+    id,
+  });
+};
+
+app.delete(['/api/notes/:id', '/notes/:id', '/api/note/:id', '/note/:id'], handleDeleteNote);
+app.post(['/api/notes/:id/delete', '/notes/:id/delete', '/api/notes/delete'], handleDeleteNote);
 
 // Image upload API
 app.post(['/api/upload', '/upload'], (req, res) => {

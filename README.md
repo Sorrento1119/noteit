@@ -48,12 +48,19 @@ npm start
 
 ## Deploying to Vercel
 
-The application is fully configured for zero-config Vercel deployment:
+The application is fully configured for seamless Vercel deployment:
 
 1. **Push to GitHub**: Commit and push your code to your GitHub repository.
 2. **Import in Vercel**: Connect your GitHub repository to Vercel.
 3. **Automatic Routing**: Vercel automatically detects the project using `vercel.json` and routes `/api/*` endpoints to the serverless function handler in `api/index.ts`, while routing frontend single-page application paths (like `/:slug`) to `index.html`.
-4. **Resilient Persistence**: Notes work with serverless API routes, safe file system handling for read-only lambdas, and automatic client-side local caching so you can immediately publish and share notes without 404 errors.
+4. **Instant Cross-Device Hydration**: When sharing via the **Share & QR** button or scanning the QR code, notes load instantly on any mobile or desktop device (0ms delay), automatically saving to the device and keeping the clean `/:slug` URL.
+5. **Permanent Note Lifetime**: Notes stay published permanently until you or an authorized user with the note password explicitly clicks **Delete**.
+6. **Optional Vercel KV / Upstash Redis**:
+   To enable global cloud persistence for users typing URLs directly into fresh browsers without following a share link:
+   - In your Vercel project dashboard, go to the **Storage** tab.
+   - Click **Create Database** -> select **KV** (or **Upstash Redis**).
+   - Click **Connect** to link it to your project.
+   - Vercel automatically configures `KV_REST_API_URL` and `KV_REST_API_TOKEN`. The app detects these immediately with zero extra configuration!
 
 ## Connecting a Custom Domain
 

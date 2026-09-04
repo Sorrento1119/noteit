@@ -10,14 +10,22 @@ import {
   ExternalLink,
   Users,
   FileText,
+  Trash2,
 } from 'lucide-react';
 import { RichEditor } from './components/RichEditor';
 import { GlobeBackground } from './components/GlobeBackground';
 import { ShareModal } from './components/ShareModal';
+import { DeleteModal } from './components/DeleteModal';
 import { PasswordPrompt } from './components/PasswordPrompt';
 import { generate4LetterWord, cleanSlug } from './utils/words';
 import { getDynamicHost, getDynamicOrigin, getDynamicNoteUrl } from './utils/domain';
-import { getLocalNote, saveLocalNote, verifyLocalPassword } from './utils/storage';
+import {
+  getLocalNote,
+  saveLocalNote,
+  verifyLocalPassword,
+  deleteLocalNote,
+  decodeNotePayload,
+} from './utils/storage';
 import { useNoteSocket } from './hooks/useNoteSocket';
 import { NoteData } from './types';
 
@@ -55,7 +63,11 @@ export default function App() {
   const [isLocked, setIsLocked] = useState(false);
   const [unlockedPassword, setUnlockedPassword] = useState<string | undefined>(undefined);
   const [showShareModal, setShowShareModal] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [isDeletingNote, setIsDeletingNote] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [copiedNotification, setCopiedNotification] = useState(false);
+
 
   // Listen to browser navigation popstate
   useEffect(() => {
@@ -148,6 +160,40 @@ export default function App() {
     setNoteNotFound(false);
     setIsLocked(false);
 
+    // 0. Check for instant portable URL payload (#n=... or #d=...)
+    try {
+      const hash = window.location.hash;
+      if (hash && (hash.startsWith('#n=') || hash.startsWith('#d='))) {
+        const payload = hash.slice(3);
+        const decoded = decodeNotePayload(payload);
+        if (decoded && decoded.id.toLowerCase() === slug.toLowerCase()) {
+          saveLocalNote(decoded, pwd);
+          setActiveNote(decoded);
+          setIsLocked(false);
+          setNoteNotFound(false);
+          setIsLoadingNote(false);
+          // Instant clean URL replacement back to pristine subpage /{slug}
+          try {
+            window.history.replaceState(null, '', `/${decoded.id.toLowerCase()}`);
+          } catch {}
+          // Register to backend asynchronously so serverless also has it
+          fetch('/api/notes', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              id: decoded.id,
+              title: decoded.title,
+              content: decoded.content,
+              overwrite: true,
+            }),
+          }).catch(() => {});
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn('Instant sync payload check notice:', err);
+    }
+
     let backendFound = false;
     try {
       const res = await fetch(`/api/notes/${encodeURIComponent(slug)}`, {
@@ -194,6 +240,43 @@ export default function App() {
       setActiveNote(null);
     }
   }, []);
+
+  // Handle note permanent deletion
+  const handleDeleteNoteConfirm = async (pwd?: string) => {
+    if (!currentPath) return;
+    setIsDeletingNote(true);
+    setDeleteError(null);
+    const targetId = currentPath.toLowerCase();
+
+    try {
+      const res = await fetch(`/api/notes/${encodeURIComponent(targetId)}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pwd || unlockedPassword }),
+      });
+
+      if (!res.ok && res.status !== 404) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.message || 'Failed to delete note from server');
+      }
+    } catch (err: any) {
+      if (err.message && (err.message.includes('password') || err.message.includes('Password'))) {
+        setDeleteError(err.message);
+        setIsDeletingNote(false);
+        return;
+      }
+      console.warn('Backend note delete notice:', err);
+    }
+
+    // Remove from local device storage
+    deleteLocalNote(targetId);
+    setIsDeletingNote(false);
+    setShowDeleteModal(false);
+    setActiveNote(null);
+    setNoteNotFound(false);
+    setIsLocked(false);
+    navigateTo('');
+  };
 
   useEffect(() => {
     if (currentPath) {
@@ -565,6 +648,21 @@ export default function App() {
                 <span className="hidden sm:inline">Share & QR</span>
               </button>
 
+              {/* Delete Note button */}
+              <button
+                type="button"
+                id="header-delete-btn"
+                onClick={() => {
+                  setDeleteError(null);
+                  setShowDeleteModal(true);
+                }}
+                title="Delete note permanently"
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-white border border-neutral-200 hover:border-red-300 hover:bg-red-50 hover:text-red-600 text-neutral-600 text-xs font-semibold transition-all cursor-pointer shadow-2xs"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Delete</span>
+              </button>
+
               {/* New note button */}
               <button
                 type="button"
@@ -768,7 +866,7 @@ export default function App() {
                     onClick={() => {
                       navigateTo('', currentPath);
                     }}
-                    className="w-full py-2.5 px-4 rounded-lg bg-neutral-900 text-white text-xs font-bold uppercase tracking-wider hover:bg-neutral-800 transition-colors"
+                    className="w-full py-2.5 px-4 rounded-lg bg-neutral-900 text-white text-xs font-bold uppercase tracking-wider hover:bg-neutral-800 transition-colors cursor-pointer"
                   >
                     Create Note at /{currentPath}
                   </button>
@@ -776,10 +874,13 @@ export default function App() {
                     type="button"
                     id="back-home-btn"
                     onClick={() => navigateTo('')}
-                    className="text-xs text-neutral-400 hover:text-neutral-700 transition-colors"
+                    className="text-xs text-neutral-400 hover:text-neutral-700 transition-colors cursor-pointer"
                   >
                     Back to note it.
                   </button>
+                </div>
+                <div className="pt-3 border-t border-neutral-100 text-[11px] text-neutral-400 text-center leading-relaxed">
+                  Published on another device? Open the link copied with <strong>Share & QR</strong> or scan the QR code from the author device to sync instantly.
                 </div>
               </div>
             ) : activeNote ? (
@@ -870,7 +971,23 @@ export default function App() {
         <ShareModal
           noteId={currentPath || customSlug}
           hasPassword={activeNote?.hasPassword || (enablePassword && Boolean(draftPassword))}
+          noteData={activeNote}
           onClose={() => setShowShareModal(false)}
+        />
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {showDeleteModal && (
+        <DeleteModal
+          noteId={currentPath}
+          hasPassword={activeNote?.hasPassword}
+          isDeleting={isDeletingNote}
+          error={deleteError}
+          onConfirm={handleDeleteNoteConfirm}
+          onClose={() => {
+            setShowDeleteModal(false);
+            setDeleteError(null);
+          }}
         />
       )}
     </div>

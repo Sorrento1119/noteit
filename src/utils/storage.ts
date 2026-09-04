@@ -60,6 +60,14 @@ export function getSavedPassword(id: string): string | undefined {
   return store[id.toLowerCase()]?.password;
 }
 
+export function deleteLocalNote(id: string): void {
+  if (!id) return;
+  const store = getStore();
+  const cleanId = id.toLowerCase();
+  delete store[cleanId];
+  setStore(store);
+}
+
 export function verifyLocalPassword(id: string, pwd: string): boolean {
   if (!id) return false;
   const store = getStore();
@@ -68,3 +76,52 @@ export function verifyLocalPassword(id: string, pwd: string): boolean {
   if (!record.note.hasPassword) return true;
   return record.password === pwd;
 }
+
+// Compact portable URL payload for instant zero-config cross-device sharing
+export function encodeNotePayload(note: NoteData): string {
+  try {
+    const mini = {
+      i: note.id,
+      t: note.title,
+      c: note.content,
+      p: note.hasPassword ? 1 : 0,
+      u: note.updatedAt || Date.now(),
+      v: note.version || 1,
+    };
+    const json = JSON.stringify(mini);
+    const encoded = btoa(unescape(encodeURIComponent(json)))
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+    return encoded;
+  } catch (err) {
+    console.warn('Failed to encode note payload:', err);
+    return '';
+  }
+}
+
+export function decodeNotePayload(payload: string): NoteData | null {
+  if (!payload || typeof payload !== 'string') return null;
+  try {
+    let base64 = payload.trim().replace(/-/g, '+').replace(/_/g, '/');
+    while (base64.length % 4) {
+      base64 += '=';
+    }
+    const json = decodeURIComponent(escape(atob(base64)));
+    const parsed = JSON.parse(json);
+    if (!parsed || !parsed.i) return null;
+    return {
+      id: String(parsed.i).toLowerCase(),
+      title: parsed.t || 'Untitled Note',
+      content: parsed.c || '',
+      hasPassword: Boolean(parsed.p),
+      createdAt: parsed.u || Date.now(),
+      updatedAt: parsed.u || Date.now(),
+      version: parsed.v || 1,
+    };
+  } catch (err) {
+    console.warn('Failed to decode note payload:', err);
+    return null;
+  }
+}
+
