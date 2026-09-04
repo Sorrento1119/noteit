@@ -1,0 +1,30 @@
+{
+  "wopl": {
+    "id": "wopl",
+    "title": "Welcome to note it.",
+    "content": "<h2>Collaborative Real-Time Notepad</h2><p>This is a live note accessible at <strong>/wopl</strong> on any connected domain. You can open this exact link from your phone, laptop, or any other browser window to see live real-time synchronization in action!</p><ul><li>✏️ Format text with bold, italics, headings, checklists</li><li>🖼️ Paste or upload images seamlessly</li><li>🔒 Protect sensitive notes with a password</li><li>⚡ Instant 4-letter shareable URLs</li></ul><p>Start typing or delete this text to test!</p>",
+    "hasPassword": false,
+    "createdAt": 1788542305811,
+    "updatedAt": 1788542305811,
+    "version": 1
+  },
+  "lock": {
+    "id": "lock",
+    "title": "Secret Note",
+    "content": "<p>Top secret plans</p>",
+    "hasPassword": true,
+    "passwordHash": "89e01536ac207279409d4de1e5253e01f4a1769e696db0d6062ca9b8f56767c8",
+    "createdAt": 1788542318800,
+    "updatedAt": 1788542318800,
+    "version": 1
+  },
+  "vlyn": {
+    "id": "vlyn",
+    "title": "Untitled Note",
+    "content": "",
+    "hasPassword": false,
+    "createdAt": 1788542687037,
+    "updatedAt": 1788542687037,
+    "version": 1
+  }
+}
