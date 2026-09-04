@@ -15,6 +15,7 @@ export function useNoteSocket({ noteId, password, onRemoteUpdate, onError }: Use
   const [peerCount, setPeerCount] = useState(1);
   const [isSyncing, setIsSyncing] = useState(false);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const retryCountRef = useRef<number>(0);
 
   const connect = useCallback(() => {
     if (!noteId) return;
@@ -28,6 +29,7 @@ export function useNoteSocket({ noteId, password, onRemoteUpdate, onError }: Use
 
       socket.onopen = () => {
         setIsConnected(true);
+        retryCountRef.current = 0;
         // Join room for this note
         const joinMsg: WebSocketClientMessage = {
           type: 'join',
@@ -65,19 +67,24 @@ export function useNoteSocket({ noteId, password, onRemoteUpdate, onError }: Use
 
       socket.onclose = () => {
         setIsConnected(false);
-        // Auto-reconnect after 2.5 seconds
+        retryCountRef.current += 1;
+        // Exponential backoff to avoid hammering serverless hosts like Vercel
+        const backoff = Math.min(30000, 2500 * Math.pow(1.5, Math.min(retryCountRef.current, 6)));
         if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
         reconnectTimeoutRef.current = setTimeout(() => {
           connect();
-        }, 2500);
+        }, backoff);
       };
 
-      socket.onerror = (err) => {
-        console.error('WebSocket error:', err);
-        socket.close();
+      socket.onerror = () => {
+        try {
+          socket.close();
+        } catch {
+          // ignore
+        }
       };
-    } catch (err) {
-      console.error('Failed to initiate WebSocket connection:', err);
+    } catch {
+      // ignore
     }
   }, [noteId, password, onRemoteUpdate, onError]);
 

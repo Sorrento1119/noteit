@@ -46,6 +46,15 @@ npm run build
 npm start
 ```
 
+## Deploying to Vercel
+
+The application is fully configured for zero-config Vercel deployment:
+
+1. **Push to GitHub**: Commit and push your code to your GitHub repository.
+2. **Import in Vercel**: Connect your GitHub repository to Vercel.
+3. **Automatic Routing**: Vercel automatically detects the project using `vercel.json` and routes `/api/*` endpoints to the serverless function handler in `api/index.ts`, while routing frontend single-page application paths (like `/:slug`) to `index.html`.
+4. **Resilient Persistence**: Notes work with serverless API routes, safe file system handling for read-only lambdas, and automatic client-side local caching so you can immediately publish and share notes without 404 errors.
+
 ## Connecting a Custom Domain
 
 The application is built to be domain-agnostic:

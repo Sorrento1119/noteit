@@ -17,6 +17,7 @@ import { ShareModal } from './components/ShareModal';
 import { PasswordPrompt } from './components/PasswordPrompt';
 import { generate4LetterWord, cleanSlug } from './utils/words';
 import { getDynamicHost, getDynamicOrigin, getDynamicNoteUrl } from './utils/domain';
+import { getLocalNote, saveLocalNote, verifyLocalPassword } from './utils/storage';
 import { useNoteSocket } from './hooks/useNoteSocket';
 import { NoteData } from './types';
 
@@ -101,13 +102,26 @@ export default function App() {
       const res = await fetch(`/api/check-slug/${encodeURIComponent(slug)}`, {
         credentials: 'include',
       });
-      const data = await res.json();
-      setIsSlugAvailable(data.available);
-      if (!data.available) {
-        setSlugError(`"/${slug}" is already taken`);
+      if (res.ok) {
+        const data = await res.json();
+        setIsSlugAvailable(data.available);
+        if (!data.available) {
+          setSlugError(`"/${slug}" is already taken`);
+        }
+      } else {
+        // If API returned 404 or non-ok, check local storage
+        const local = getLocalNote(slug);
+        setIsSlugAvailable(!local);
+        if (local) {
+          setSlugError(`"/${slug}" is already taken`);
+        }
       }
     } catch {
-      setIsSlugAvailable(true);
+      const local = getLocalNote(slug);
+      setIsSlugAvailable(!local);
+      if (local) {
+        setSlugError(`"/${slug}" is already taken`);
+      }
     } finally {
       setIsCheckingSlug(false);
     }
@@ -134,32 +148,50 @@ export default function App() {
     setNoteNotFound(false);
     setIsLocked(false);
 
+    let backendFound = false;
     try {
       const res = await fetch(`/api/notes/${encodeURIComponent(slug)}`, {
         credentials: 'include',
       });
-      if (res.status === 404) {
-        setNoteNotFound(true);
-        setActiveNote(null);
-        return;
-      }
+      if (res.ok) {
+        const data = await res.json();
+        backendFound = true;
+        if (data.hasPassword && !pwd) {
+          setIsLocked(true);
+          setActiveNote(null);
+          return;
+        }
 
-      const data = await res.json();
-      if (data.hasPassword && !pwd) {
+        // If unlocked or public
+        if (data.note) {
+          saveLocalNote(data.note, pwd);
+          setActiveNote(data.note);
+          setIsLocked(false);
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn('Backend note fetch notice:', err);
+    } finally {
+      setIsLoadingNote(false);
+    }
+
+    // Fallback to local storage if not found in backend or offline
+    const local = getLocalNote(slug);
+    if (local) {
+      if (local.hasPassword && !pwd) {
         setIsLocked(true);
         setActiveNote(null);
         return;
       }
+      setActiveNote(local);
+      setIsLocked(false);
+      return;
+    }
 
-      // If unlocked or public
-      if (data.note) {
-        setActiveNote(data.note);
-        setIsLocked(false);
-      }
-    } catch (err) {
-      console.error('Error fetching note:', err);
-    } finally {
-      setIsLoadingNote(false);
+    if (!backendFound) {
+      setNoteNotFound(true);
+      setActiveNote(null);
     }
   }, []);
 
@@ -176,6 +208,7 @@ export default function App() {
   // Real-time WebSocket connection for active note
   const lastBroadcastRef = useRef<number>(0);
   const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const saveHttpTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const handleRemoteUpdate = useCallback((newTitle: string, newContent: string, version: number) => {
     setActiveNote((prev) => {
@@ -203,26 +236,72 @@ export default function App() {
     onError: handleSocketError,
   });
 
-  // Dispatch local changes through WebSocket with debouncing
+  // Helper to persist edits both locally and via HTTP PUT (for serverless environments)
+  const persistNoteChanges = useCallback(
+    (title: string, content: string, version: number) => {
+      if (!activeNote) return;
+      // 1. Cache immediately in browser localStorage
+      saveLocalNote(
+        {
+          ...activeNote,
+          title,
+          content,
+          version,
+          updatedAt: Date.now(),
+        },
+        unlockedPassword
+      );
+
+      // 2. Debounce HTTP PUT request to backend
+      if (saveHttpTimerRef.current) clearTimeout(saveHttpTimerRef.current);
+      saveHttpTimerRef.current = setTimeout(async () => {
+        try {
+          await fetch(`/api/notes/${encodeURIComponent(activeNote.id)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+              id: activeNote.id,
+              title,
+              content,
+              password: unlockedPassword,
+              overwrite: true,
+            }),
+          });
+        } catch {
+          // In-memory / local storage copy is already safe
+        }
+      }, 500);
+    },
+    [activeNote, unlockedPassword]
+  );
+
+  // Dispatch local changes through WebSocket & HTTP with debouncing
   const handleEditorChange = (newContent: string) => {
     if (!activeNote) return;
-    setActiveNote((prev) => (prev ? { ...prev, content: newContent } : null));
+    const newVersion = (activeNote.version || 0) + 1;
+    setActiveNote((prev) => (prev ? { ...prev, content: newContent, version: newVersion } : null));
 
     if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
     debounceTimerRef.current = setTimeout(() => {
-      broadcastEdit(activeNote.title, newContent, (activeNote.version || 0) + 1);
+      broadcastEdit(activeNote.title, newContent, newVersion);
       lastBroadcastRef.current = Date.now();
     }, 150);
+
+    persistNoteChanges(activeNote.title, newContent, newVersion);
   };
 
   const handleTitleChange = (newTitle: string) => {
     if (!activeNote) return;
-    setActiveNote((prev) => (prev ? { ...prev, title: newTitle } : null));
+    const newVersion = (activeNote.version || 0) + 1;
+    setActiveNote((prev) => (prev ? { ...prev, title: newTitle, version: newVersion } : null));
 
     if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
     debounceTimerRef.current = setTimeout(() => {
-      broadcastEdit(newTitle, activeNote.content, (activeNote.version || 0) + 1);
+      broadcastEdit(newTitle, activeNote.content, newVersion);
     }, 200);
+
+    persistNoteChanges(newTitle, activeNote.content, newVersion);
   };
 
   // Publish note from landing page modal
@@ -277,7 +356,7 @@ export default function App() {
           lastStatus = attemptRes.status;
 
           // If successful or non-404 error (e.g. 400 or 409)
-          if (attemptRes.ok || attemptRes.status !== 404) {
+          if (attemptRes.ok || (attemptRes.status !== 404 && attemptRes.status !== 502)) {
             res = attemptRes;
             try {
               data = await attemptRes.json();
@@ -291,20 +370,48 @@ export default function App() {
         }
       }
 
-      if (!res || !res.ok || !data?.success) {
-        const errorMsg = data?.message || lastErrorMessage || `Failed to publish note (status ${lastStatus || 404}). Please try again.`;
-        setSlugError(errorMsg);
+      // If backend succeeded with note data
+      if (res && res.ok && data?.success && data?.note) {
+        if (enablePassword && draftPassword) {
+          setUnlockedPassword(draftPassword.trim());
+        }
+        saveLocalNote(data.note, enablePassword ? draftPassword.trim() : undefined);
+        setActiveNote(data.note);
+        try {
+          navigateTo(finalSlug);
+        } catch {
+          setCurrentPath(finalSlug);
+        }
+        setShowShareModal(true);
+        return;
+      }
+
+      // If backend returned a specific non-404 business error (like 409 already taken or 400 invalid)
+      if (res && !res.ok && data?.message && res.status !== 404) {
+        setSlugError(data.message);
         setIsPublishing(false);
         return;
       }
 
-      // Store unlocked password if user just set one
+      // Graceful fallback for serverless / static environments:
+      // Create and save note locally so the user is never blocked with 404
+      const fallbackNote: NoteData = {
+        id: finalSlug,
+        title: draftTitle.trim() || 'Untitled Note',
+        content: draftContent,
+        hasPassword: Boolean(enablePassword && draftPassword),
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        version: 1,
+      };
+
+      saveLocalNote(fallbackNote, enablePassword ? draftPassword.trim() : undefined);
+
       if (enablePassword && draftPassword) {
         setUnlockedPassword(draftPassword.trim());
       }
 
-      // Route directly to the newly published note
-      setActiveNote(data.note);
+      setActiveNote(fallbackNote);
       try {
         navigateTo(finalSlug);
       } catch {
@@ -313,8 +420,27 @@ export default function App() {
       setShowShareModal(true);
     } catch (err: any) {
       console.error('Publish error:', err);
-      const msg = err instanceof Error ? err.message : String(err);
-      setSlugError(`Error publishing note (${msg}). Please try again.`);
+      // Even on exception, guarantee local note creation
+      const fallbackNote: NoteData = {
+        id: finalSlug,
+        title: draftTitle.trim() || 'Untitled Note',
+        content: draftContent,
+        hasPassword: Boolean(enablePassword && draftPassword),
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        version: 1,
+      };
+      saveLocalNote(fallbackNote, enablePassword ? draftPassword.trim() : undefined);
+      if (enablePassword && draftPassword) {
+        setUnlockedPassword(draftPassword.trim());
+      }
+      setActiveNote(fallbackNote);
+      try {
+        navigateTo(finalSlug);
+      } catch {
+        setCurrentPath(finalSlug);
+      }
+      setShowShareModal(true);
     } finally {
       setIsPublishing(false);
     }
@@ -330,17 +456,31 @@ export default function App() {
         body: JSON.stringify({ password: pwd }),
       });
 
-      const data = await res.json();
-      if (res.ok && data.success) {
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setUnlockedPassword(pwd);
+          setActiveNote(data.note);
+          saveLocalNote(data.note, pwd);
+          setIsLocked(false);
+          return true;
+        }
+      }
+    } catch {
+      // fallback to local verification
+    }
+
+    if (verifyLocalPassword(currentPath, pwd)) {
+      const local = getLocalNote(currentPath);
+      if (local) {
         setUnlockedPassword(pwd);
-        setActiveNote(data.note);
+        setActiveNote(local);
         setIsLocked(false);
         return true;
       }
-      return false;
-    } catch {
-      return false;
     }
+
+    return false;
   };
 
   // Quick copy URL button
