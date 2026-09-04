@@ -22,9 +22,35 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
+// CORS middleware allowing cross-domain / custom-domain requests
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(200);
+    return;
+  }
+  next();
+});
+
 // Support JSON payloads up to 50mb for embedded images and rich content
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// Express JSON body-parser error handler to prevent HTML 400 responses
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err) {
+    console.error('Request parsing error:', err.message || err);
+    if (err.type === 'entity.too.large') {
+      res.status(413).json({ success: false, message: 'Payload too large. Please reduce image or note size.' });
+      return;
+    }
+    res.status(400).json({ success: false, message: err.message || 'Invalid request body' });
+    return;
+  }
+  next();
+});
 
 // Ensure data directory exists
 const DATA_DIR = path.join(process.cwd(), 'data');

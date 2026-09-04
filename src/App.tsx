@@ -69,7 +69,11 @@ export default function App() {
   // Update browser URL
   const navigateTo = (slug: string) => {
     const targetUrl = slug ? `/${slug}` : '/';
-    window.history.pushState(null, '', targetUrl);
+    try {
+      window.history.pushState(null, '', targetUrl);
+    } catch (err) {
+      console.warn('history.pushState unavailable (e.g. sandboxed iframe):', err);
+    }
     const cleaned = slug.toLowerCase();
     setCurrentPath(cleaned);
     if (!cleaned) {
@@ -246,9 +250,15 @@ export default function App() {
         }),
       });
 
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        setSlugError(data.message || 'Failed to publish note');
+      let data: any = null;
+      try {
+        data = await res.json();
+      } catch (parseErr) {
+        console.warn('Server response was not JSON:', parseErr);
+      }
+
+      if (!res.ok || !data?.success) {
+        setSlugError(data?.message || `Failed to publish note (status ${res.status}). Please try again.`);
         setIsPublishing(false);
         return;
       }
@@ -260,10 +270,16 @@ export default function App() {
 
       // Route directly to the newly published note
       setActiveNote(data.note);
-      navigateTo(finalSlug);
+      try {
+        navigateTo(finalSlug);
+      } catch {
+        setCurrentPath(finalSlug);
+      }
       setShowShareModal(true);
-    } catch {
-      setSlugError('Network error while publishing. Please try again.');
+    } catch (err: any) {
+      console.error('Publish error:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      setSlugError(`Error publishing note (${msg}). Please try again.`);
     } finally {
       setIsPublishing(false);
     }
