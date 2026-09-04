@@ -24,7 +24,9 @@ const wss = new WebSocketServer({ server });
 
 // CORS middleware allowing cross-domain / custom-domain requests
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
+  const origin = req.headers.origin || '*';
+  res.header('Access-Control-Allow-Origin', origin);
+  res.header('Access-Control-Allow-Credentials', 'true');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
   if (req.method === 'OPTIONS') {
@@ -132,14 +134,25 @@ function sanitizeNote(note: StoredNote) {
 }
 
 // REST APIs
-app.get('/api/check-slug/:id', (req, res) => {
-  const id = req.params.id.trim().toLowerCase();
+// Check slug availability
+const handleCheckSlug = (req: express.Request, res: express.Response) => {
+  const raw = (req.params.id || (req.query.slug as string) || (req.query.id as string) || '').trim().toLowerCase();
+  const id = raw.replace(/[^a-z0-9-_]/g, '');
+  if (!id) {
+    res.json({ id: '', available: false });
+    return;
+  }
   const exists = notesStore.has(id);
   res.json({ id, available: !exists });
-});
+};
 
-app.get('/api/notes/:id', (req, res) => {
-  const id = req.params.id.trim().toLowerCase();
+app.get('/api/check-slug/:id', handleCheckSlug);
+app.get('/api/check-slug', handleCheckSlug);
+
+// Get note by ID
+const handleGetNote = (req: express.Request, res: express.Response) => {
+  const raw = (req.params.id || (req.query.id as string) || '').trim().toLowerCase();
+  const id = raw.replace(/[^a-z0-9-_]/g, '');
   const note = notesStore.get(id);
 
   if (!note) {
@@ -163,10 +176,20 @@ app.get('/api/notes/:id', (req, res) => {
     hasPassword: false,
     note: sanitizeNote(note),
   });
+};
+
+app.get('/api/notes/:id', handleGetNote);
+app.get('/api/note/:id', handleGetNote);
+
+// Root /api/notes info
+app.get('/api/notes', (req, res) => {
+  res.json({ success: true, count: notesStore.size });
 });
 
-app.post('/api/notes/:id/verify', (req, res) => {
-  const id = req.params.id.trim().toLowerCase();
+// Password verification for protected notes
+const handleVerifyNote = (req: express.Request, res: express.Response) => {
+  const raw = (req.params.id || req.body.id || '').trim().toLowerCase();
+  const id = raw.replace(/[^a-z0-9-_]/g, '');
   const { password } = req.body;
   const note = notesStore.get(id);
 
@@ -186,10 +209,17 @@ app.post('/api/notes/:id/verify', (req, res) => {
   }
 
   res.json({ success: true, note: sanitizeNote(note) });
-});
+};
 
-app.post('/api/notes', (req, res) => {
-  const { id: rawId, title = 'Untitled Note', content = '', password } = req.body;
+app.post('/api/notes/:id/verify', handleVerifyNote);
+app.post('/api/note/:id/verify', handleVerifyNote);
+app.post('/api/notes/verify', handleVerifyNote);
+
+// Create or update note (supports POST /api/notes, POST /api/notes/:id, PUT /api/notes/:id, etc.)
+const handleCreateOrUpdateNote = (req: express.Request, res: express.Response) => {
+  const rawId = req.body.id || req.params.id || (req.query.id as string);
+  const { title = 'Untitled Note', content = '', password, overwrite } = req.body;
+
   if (!rawId || typeof rawId !== 'string') {
     res.status(400).json({ success: false, message: 'Valid note ID is required' });
     return;
@@ -203,6 +233,31 @@ app.post('/api/notes', (req, res) => {
 
   const existing = notesStore.get(id);
   if (existing) {
+    // If overwrite is requested, or it's a PUT / direct path update
+    const isUpdateRequest = Boolean(overwrite || req.method === 'PUT' || req.params.id);
+    if (isUpdateRequest) {
+      if (existing.hasPassword && password && hashPassword(password) !== existing.passwordHash) {
+        res.status(401).json({ success: false, message: 'Incorrect password for existing note' });
+        return;
+      }
+      if (typeof title === 'string' && title.trim()) {
+        existing.title = title.trim();
+      }
+      if (typeof content === 'string') {
+        existing.content = content;
+      }
+      existing.updatedAt = Date.now();
+      existing.version = (existing.version || 1) + 1;
+      saveNotes();
+
+      res.json({
+        success: true,
+        note: sanitizeNote(existing),
+        updated: true,
+      });
+      return;
+    }
+
     res.status(409).json({ success: false, message: `The path "/${id}" is already taken. Please choose another.` });
     return;
   }
@@ -210,8 +265,8 @@ app.post('/api/notes', (req, res) => {
   const hasPassword = Boolean(password && password.trim().length > 0);
   const newNote: StoredNote = {
     id,
-    title: title.trim() || 'Untitled Note',
-    content: content || '',
+    title: (typeof title === 'string' && title.trim()) ? title.trim() : 'Untitled Note',
+    content: typeof content === 'string' ? content : '',
     hasPassword,
     passwordHash: hasPassword ? hashPassword(password.trim()) : undefined,
     createdAt: Date.now(),
@@ -226,7 +281,14 @@ app.post('/api/notes', (req, res) => {
     success: true,
     note: sanitizeNote(newNote),
   });
-});
+};
+
+app.post('/api/notes', handleCreateOrUpdateNote);
+app.post('/api/notes/:id', handleCreateOrUpdateNote);
+app.post('/api/note', handleCreateOrUpdateNote);
+app.post('/api/note/:id', handleCreateOrUpdateNote);
+app.put('/api/notes/:id', handleCreateOrUpdateNote);
+app.put('/api/notes', handleCreateOrUpdateNote);
 
 // Image upload API
 app.post('/api/upload', (req, res) => {

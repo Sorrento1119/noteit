@@ -104,6 +104,7 @@ export const RichEditor: React.FC<RichEditorProps> = ({
           const res = await fetch('/api/upload', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({ imageBase64: base64, filename: file.name }),
           });
           const data = await res.json();

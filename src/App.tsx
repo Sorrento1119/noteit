@@ -67,7 +67,7 @@ export default function App() {
   }, []);
 
   // Update browser URL
-  const navigateTo = (slug: string) => {
+  const navigateTo = (slug: string, preserveSlug?: string) => {
     const targetUrl = slug ? `/${slug}` : '/';
     try {
       window.history.pushState(null, '', targetUrl);
@@ -77,7 +77,7 @@ export default function App() {
     const cleaned = slug.toLowerCase();
     setCurrentPath(cleaned);
     if (!cleaned) {
-      setCustomSlug(generate4LetterWord());
+      setCustomSlug(preserveSlug || generate4LetterWord());
       setDraftTitle('Untitled Note');
       setDraftContent('');
       setEnablePassword(false);
@@ -98,7 +98,9 @@ export default function App() {
     setIsCheckingSlug(true);
     setSlugError(null);
     try {
-      const res = await fetch(`/api/check-slug/${encodeURIComponent(slug)}`);
+      const res = await fetch(`/api/check-slug/${encodeURIComponent(slug)}`, {
+        credentials: 'include',
+      });
       const data = await res.json();
       setIsSlugAvailable(data.available);
       if (!data.available) {
@@ -133,7 +135,9 @@ export default function App() {
     setIsLocked(false);
 
     try {
-      const res = await fetch(`/api/notes/${encodeURIComponent(slug)}`);
+      const res = await fetch(`/api/notes/${encodeURIComponent(slug)}`, {
+        credentials: 'include',
+      });
       if (res.status === 404) {
         setNoteNotFound(true);
         setActiveNote(null);
@@ -238,27 +242,58 @@ export default function App() {
     setIsPublishing(true);
     setSlugError(null);
 
-    try {
-      const res = await fetch('/api/notes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id: finalSlug,
-          title: draftTitle.trim() || 'Untitled Note',
-          content: draftContent,
-          password: enablePassword && draftPassword ? draftPassword.trim() : undefined,
-        }),
-      });
+    const payload = JSON.stringify({
+      id: finalSlug,
+      title: draftTitle.trim() || 'Untitled Note',
+      content: draftContent,
+      password: enablePassword && draftPassword ? draftPassword.trim() : undefined,
+      overwrite: true,
+    });
 
+    try {
+      let res: Response | null = null;
+      const origin = getDynamicOrigin();
+      // Candidate endpoints to handle custom domains, proxies, and path variations
+      const endpoints = [
+        '/api/notes',
+        `/api/notes/${encodeURIComponent(finalSlug)}`,
+        origin ? `${origin}/api/notes` : '',
+        origin ? `${origin}/api/notes/${encodeURIComponent(finalSlug)}` : '',
+      ].filter(Boolean);
+
+      let lastStatus = 0;
+      let lastErrorMessage = '';
       let data: any = null;
-      try {
-        data = await res.json();
-      } catch (parseErr) {
-        console.warn('Server response was not JSON:', parseErr);
+
+      for (const endpoint of endpoints) {
+        try {
+          const attemptRes = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: payload,
+          });
+
+          lastStatus = attemptRes.status;
+
+          // If successful or non-404 error (e.g. 400 or 409)
+          if (attemptRes.ok || attemptRes.status !== 404) {
+            res = attemptRes;
+            try {
+              data = await attemptRes.json();
+            } catch (jsonErr) {
+              console.warn('Failed parsing JSON response:', jsonErr);
+            }
+            break;
+          }
+        } catch (attemptErr) {
+          console.warn(`Fetch to ${endpoint} failed:`, attemptErr);
+        }
       }
 
-      if (!res.ok || !data?.success) {
-        setSlugError(data?.message || `Failed to publish note (status ${res.status}). Please try again.`);
+      if (!res || !res.ok || !data?.success) {
+        const errorMsg = data?.message || lastErrorMessage || `Failed to publish note (status ${lastStatus || 404}). Please try again.`;
+        setSlugError(errorMsg);
         setIsPublishing(false);
         return;
       }
@@ -291,6 +326,7 @@ export default function App() {
       const res = await fetch(`/api/notes/${encodeURIComponent(currentPath)}/verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ password: pwd }),
       });
 
@@ -590,8 +626,7 @@ export default function App() {
                     type="button"
                     id="create-this-path-btn"
                     onClick={() => {
-                      setCustomSlug(currentPath);
-                      navigateTo('');
+                      navigateTo('', currentPath);
                     }}
                     className="w-full py-2.5 px-4 rounded-lg bg-neutral-900 text-white text-xs font-bold uppercase tracking-wider hover:bg-neutral-800 transition-colors"
                   >
